@@ -221,14 +221,18 @@ class Trader:
             avg_sell_volume = sum(abs(order_depth.sell_orders[price]) for price in order_depth.sell_orders.keys()) / len(order_depth.sell_orders)
             avg_buy_volume = sum(abs(order_depth.buy_orders[price]) for price in order_depth.buy_orders.keys()) / len(order_depth.buy_orders)
             vol = math.floor(min(avg_sell_volume, avg_buy_volume))
+            print("Volume filter set to: ", vol)
             fair_value = self.kelp_fair_value(order_depth, method="mid_price_with_vol_filter", min_vol=vol)
         else: # but really this should never run
+            print("Uh oh why am I here?")
             fair_value = self.kelp_fair_value(order_depth, method="mid_price")
 
         # best ask after fair -- this is where we would like to place our sell order
-        baaf = min([price for price in order_depth.sell_orders.keys() if price > fair_value + 1])
+        aaf = [price for price in order_depth.sell_orders.keys() if price > fair_value + 1]
+        baaf = min(aaf) if len(aaf) > 0 else fair_value + 2
         # best bid before fair -- this is where we would like to place our buy order
-        bbbf = max([price for price in order_depth.buy_orders.keys() if price < fair_value - 1])
+        bbf = [price for price in order_depth.buy_orders.keys() if price < fair_value - 1]
+        bbbf = max(bbf) if len(bbf) > 0 else fair_value - 2
 
         if len(order_depth.sell_orders) != 0:
             best_ask = min(order_depth.sell_orders.keys())
