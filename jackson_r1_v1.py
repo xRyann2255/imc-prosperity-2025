@@ -48,7 +48,7 @@ class Trader:
         position: int,
         buy_order_volume: int,
         sell_order_volume: int,
-    ) -> (int, int):
+    ) -> (int, int): # type: ignore
         position_limit = self.LIMIT[product]
 
         if order_depth.sell_orders:
@@ -86,7 +86,7 @@ class Trader:
         position: int,
         buy_order_volume: int,
         sell_order_volume: int,
-    ) -> (int, int):
+    ) -> (int, int): # type: ignore
         buy_quantity = self.LIMIT[product] - (position + buy_order_volume)
         if buy_quantity > 0:
             orders.append(Order(product, round(bid), buy_quantity))
@@ -106,7 +106,7 @@ class Trader:
         position: int,
         buy_order_volume: int,
         sell_order_volume: int,
-    ) -> (int, int):
+    ) -> (int, int): # type: ignore
         position_after_take = position + buy_order_volume - sell_order_volume
         fair_for_bid = round(fair_value - width)
         fair_for_ask = round(fair_value + width)

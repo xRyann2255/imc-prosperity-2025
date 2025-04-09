@@ -166,7 +166,7 @@ class Trader:
 
         return orders
 
-    def clear_position_order(self, orders: List[Order], order_depth: OrderDepth, position: int, position_limit: int, product: str, buy_order_volume: int, sell_order_volume: int, fair_value: float, width: int) -> (int, int):
+    def clear_position_order(self, orders: List[Order], order_depth: OrderDepth, position: int, position_limit: int, product: str, buy_order_volume: int, sell_order_volume: int, fair_value: float, width: int) -> (int, int): # type: ignore
         position_after_take = position + buy_order_volume - sell_order_volume
         fair_for_bid = math.floor(fair_value)
         fair_for_ask = math.ceil(fair_value)
