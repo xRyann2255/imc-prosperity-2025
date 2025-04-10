@@ -5,6 +5,7 @@ import jsonpickle
 import numpy as np
 import math
 import string
+import collections
 
 # Import required classes from datamodel
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState, UserId
