@@ -1,0 +1,17 @@
+{
+  "model_type": "ar",
+  "intercept": 1.7098311664860821,
+  "coefficients": [
+    0.7966228785965643,
+    0.2025172952174838
+  ],
+  "feature_info": [
+    1,
+    2
+  ],
+  "metrics": {
+    "mse": 2.7591545455754702,
+    "normalized_mse": 7.78752989247015e-07,
+    "direction_accuracy": 0.6365
+  }
+}
