@@ -123,6 +123,12 @@ logger = Logger()
 # Trader algorithm class
 class Trader:
     def __init__(self):
+        
+        # Mean reversion parameters
+        self.squid_ma_short = 3   # Short-term moving average period
+        self.squid_ma_long = 40  # Long-term moving average period (mean to revert to)
+        self.squid_z_threshold = 3  # Z-score threshold for entry
+        
         # Price history for each product
         self.price_history = {
             "RAINFOREST_RESIN": deque(maxlen=50),
@@ -140,15 +146,6 @@ class Trader:
         }
         
         
-        # Mean reversion parameters
-        self.squid_ma_short = 5   # Short-term moving average period
-        self.squid_ma_long = 20   # Long-term moving average period (mean to revert to)
-        self.squid_z_threshold = 1.5  # Z-score threshold for entry
-        
-        # Configure EMA decay factors for SQUID_INK
-        self.squid_ema_short_decay = 2 / (self.squid_ma_short + 1)   # For short-term EMA
-        self.squid_ema_long_decay = 2 / (self.squid_ma_long + 1)     # For long-term EMA
-        
     def calculate_mid_price(self, order_depth):
         """Calculate the mid price from the order book"""
         if not order_depth.buy_orders or not order_depth.sell_orders:
@@ -165,8 +162,9 @@ class Trader:
             return None
         return sum(prices[-period:]) / period
     
-    def calculate_exponential_moving_average(self, prices: List[float], decay: float) -> float:
+    def calculate_exponential_moving_average(self, prices: List[float], period: int) -> float:
         """Calculate the exponential moving average (EMA) using the given decay (alpha)."""
+        decay = 2 / (period + 1)
         if not prices:
             return None
         ema = prices[0]
@@ -190,6 +188,30 @@ class Trader:
         z_score = (current_price - ma) / std_dev
         
         return z_score, ma
+    
+    def calculate_ema_z_score(self, current_price: float, prices: List[float], period: int) -> Tuple[float, float]:
+        """
+        Compute z-score using exponentially weighted mean and standard deviation.
+        Both mean and variance are computed with same decay (alpha = 2 / (period + 1)).
+        """
+        if len(prices) < period:
+            return 0.0, None
+
+        alpha = 2 / (period + 1)
+        ema = prices[0]
+        ew_var = 0.0
+
+        # Step through prices to compute EMA and exponentially weighted variance
+        for price in prices[1:]:
+            prev_ema = ema
+            ema = alpha * price + (1 - alpha) * ema
+            deviation = price - prev_ema
+            ew_var = alpha * (deviation ** 2) + (1 - alpha) * ew_var
+
+        std_dev = math.sqrt(ew_var) if ew_var > 0 else 1.0  # Avoid division by zero
+
+        z_score = (current_price - ema) / std_dev
+        return z_score, ema
 
     def rainforest_resin_orders(
         self,
@@ -373,6 +395,21 @@ class Trader:
             orders.append(Order("KELP", baaf - 1, -sell_quantity))
 
         return orders
+    
+    def calculate_order_book_imbalance(self, order_depth: OrderDepth) -> float:
+        """Calculate order book imbalance as a ratio of buy orders to sell orders"""
+        if not order_depth.buy_orders or not order_depth.sell_orders:
+            return 0.0
+        
+        total_buy_volume = sum(order_depth.buy_orders.values())
+        total_sell_volume = abs(sum(order_depth.sell_orders.values()))
+        
+        if total_buy_volume + total_sell_volume == 0:
+            return 0.0
+        
+        imbalance = (total_buy_volume - total_sell_volume) / (total_buy_volume + total_sell_volume)
+        
+        return imbalance
 
     def squid_ink_mean_reversion(
         self, order_depth: OrderDepth, symbol: str, position: int, position_limit: int, timestamp: int
@@ -390,15 +427,8 @@ class Trader:
         mid_price = (best_bid + best_ask) / 2
         spread = best_ask - best_bid
         
-        # calculate trade imbalance
-        trade_imbalance = 0
-        for price, volume in order_depth.buy_orders.items():
-            if price < best_bid:
-                trade_imbalance += volume
-        for price, volume in order_depth.sell_orders.items():
-            if price > best_ask:
-                trade_imbalance -= volume
-        
+        order_book_imbalance = self.calculate_order_book_imbalance(order_depth)
+    
         # Update price history
         self.price_history["SQUID_INK"].append(mid_price)
         prices = list(self.price_history["SQUID_INK"])
@@ -413,8 +443,11 @@ class Trader:
         ma_long = self.calculate_exponential_moving_average(prices, self.squid_ma_long)
         
         # Calculate z-score - how far current price deviates from long-term mean
-        z_score, _ = self.calculate_z_score(mid_price, prices, self.squid_ma_long)
-        
+        z_score, _ = self.calculate_ema_z_score(mid_price, prices, self.squid_ma_long)
+
+ 
+        logger.print(f"SQUID_INK price history: {prices[-10:]}")
+        logger.print(f"SQUID_INK order book imbalance: {order_book_imbalance}")
         # Log current metrics
         logger.print(f"SQUID_INK: price={mid_price}, MA(short)={ma_short:.2f}, MA(long)={ma_long:.2f}, z-score={z_score:.2f}, position={position}")
         
@@ -424,11 +457,11 @@ class Trader:
         
         # Mean reversion trading logic
         if cooldown_elapsed:
-            # Strong mean reversion signal - price significantly above long-term mean
+            # Strong mean reversion signal - price significantly above long-term mean while trade imbalance is negative
             if z_score > self.squid_z_threshold and position > -position_limit * 0.8:
                 # Calculate size based on signal strength - stronger signal = larger position
                 signal_strength = min(abs(z_score) / 3.0, 1.0)  # Scale between 0-1
-                size = max(1, int(position_limit * signal_strength * 0.2))  # Use up to 20% of position limit
+                size = max(1, int(position_limit * signal_strength * 0.8))  # Use up to 20% of position limit
                 sell_quantity = min(size, position_limit + position)
                 
                 if sell_quantity > 0:
@@ -451,7 +484,7 @@ class Trader:
             elif z_score < -self.squid_z_threshold and position < position_limit * 0.8:
                 # Calculate size based on signal strength
                 signal_strength = min(abs(z_score) / 3.0, 1.0)  # Scale between 0-1
-                size = max(1, int(position_limit * signal_strength * 0.2))  # Use up to 20% of position limit
+                size = max(1, int(position_limit * signal_strength * 0.8))  # Use up to 20% of position limit
                 buy_quantity = min(size, position_limit - position)
                 
                 if buy_quantity > 0:
