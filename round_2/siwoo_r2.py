@@ -155,7 +155,7 @@ class Trader:
             "DJEMBES": 60
         }
         
-        self.basket1_margin = 30  # Margin for basket1 arbitrage
+        self.basket1_margin = 10  # Margin for basket1 arbitrage
         
     def calculate_mid_price(self, order_depth):
         """Calculate the mid price from the order book"""
