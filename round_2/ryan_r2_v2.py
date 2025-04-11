@@ -126,8 +126,8 @@ class Trader:
         self.has_plotted = False
         self.final_timestamp = 10000
         # Mean reversion parameters
-        self.squid_ma_long = 39  # Long-term moving average period (mean to revert to)
-        self.squid_z_threshold = 3 # Z-score threshold for entry
+        self.squid_ma_long = 15  # Long-term moving average period (mean to revert to)
+        self.squid_z_threshold = 2.1 # Z-score threshold for entry
 
         # Price history for each product
         self.price_history = {
@@ -141,7 +141,7 @@ class Trader:
             "SQUID_INK": {
                 "positions": [],
                 "last_trade_time": 0,
-                "trade_cooldown": 2
+                "trade_cooldown": 1
             }
         }
         
