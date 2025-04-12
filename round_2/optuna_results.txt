@@ -1,0 +1,23 @@
+OPTIMAL PARAMETERS:
+squid_ma_window = 22
+squid_entry_threshold = 2.6841315412435565
+squid_exit_threshold = 0.5281059336961417
+squid_stop_loss_threshold = 4.534552748722216
+squid_price_stop_loss_pct = 0.53949%
+squid_trend_window = 73
+squid_trend_threshold = 0.029131609221562667
+squid_trade_cooldown = 2
+squid_volatility_lookback = 74
+Total SQUID_INK profit: 7221.0
+
+TOP 10 TRIALS:
+1. squid_ma_window=22, squid_entry_threshold=2.6841315412435565, squid_exit_threshold=0.5281059336961417, squid_stop_loss_threshold=4.534552748722216, squid_price_stop_loss_pct=0.53949%, squid_trend_window=73, squid_trend_threshold=0.029131609221562667, squid_trade_cooldown=2, squid_volatility_lookback=74, profit=7221.0
+2. squid_ma_window=37, squid_entry_threshold=2.837570740364084, squid_exit_threshold=0.10331091532638063, squid_stop_loss_threshold=5.8096164858461945, squid_price_stop_loss_pct=0.47943%, squid_trend_window=86, squid_trend_threshold=0.04544393036394518, squid_trade_cooldown=5, squid_volatility_lookback=13, profit=6510.0
+3. squid_ma_window=49, squid_entry_threshold=2.9773614959790478, squid_exit_threshold=0.6741738822287218, squid_stop_loss_threshold=5.01711230658016, squid_price_stop_loss_pct=0.22774%, squid_trend_window=77, squid_trend_threshold=0.03727221769869746, squid_trade_cooldown=7, squid_volatility_lookback=66, profit=6020.0
+4. squid_ma_window=38, squid_entry_threshold=2.8237991143872305, squid_exit_threshold=0.6860583276141198, squid_stop_loss_threshold=5.663503110422167, squid_price_stop_loss_pct=0.15395%, squid_trend_window=94, squid_trend_threshold=0.025903132318449623, squid_trade_cooldown=6, squid_volatility_lookback=78, profit=5429.0
+5. squid_ma_window=25, squid_entry_threshold=2.869866996556891, squid_exit_threshold=0.6315033873060955, squid_stop_loss_threshold=5.424496699222661, squid_price_stop_loss_pct=0.30447%, squid_trend_window=77, squid_trend_threshold=0.03237477712200999, squid_trade_cooldown=3, squid_volatility_lookback=64, profit=4567.0
+6. squid_ma_window=21, squid_entry_threshold=2.666598063749554, squid_exit_threshold=0.5319715096383835, squid_stop_loss_threshold=4.414094054750396, squid_price_stop_loss_pct=0.57816%, squid_trend_window=74, squid_trend_threshold=0.028174283525486215, squid_trade_cooldown=3, squid_volatility_lookback=75, profit=4381.0
+7. squid_ma_window=21, squid_entry_threshold=2.7380797502968757, squid_exit_threshold=0.7800567781888289, squid_stop_loss_threshold=4.874374800841068, squid_price_stop_loss_pct=0.41710%, squid_trend_window=87, squid_trend_threshold=0.0384373051275093, squid_trade_cooldown=5, squid_volatility_lookback=33, profit=4201.0
+8. squid_ma_window=24, squid_entry_threshold=2.7478684294154716, squid_exit_threshold=0.795012377148562, squid_stop_loss_threshold=3.801861428821611, squid_price_stop_loss_pct=0.54449%, squid_trend_window=67, squid_trend_threshold=0.029639744504188048, squid_trade_cooldown=2, squid_volatility_lookback=87, profit=3674.0
+9. squid_ma_window=50, squid_entry_threshold=2.982465041476933, squid_exit_threshold=0.6393825262159868, squid_stop_loss_threshold=5.62950553010013, squid_price_stop_loss_pct=0.21074%, squid_trend_window=92, squid_trend_threshold=0.04415888374758729, squid_trade_cooldown=7, squid_volatility_lookback=49, profit=3574.0
+10. squid_ma_window=35, squid_entry_threshold=2.937689719387975, squid_exit_threshold=0.1199522688489857, squid_stop_loss_threshold=5.882242912493168, squid_price_stop_loss_pct=0.46632%, squid_trend_window=86, squid_trend_threshold=0.04451191242925205, squid_trade_cooldown=5, squid_volatility_lookback=10, profit=3516.0

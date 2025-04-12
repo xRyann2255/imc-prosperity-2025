@@ -3,9 +3,7 @@ from typing import Any, Dict, List, Tuple
 import math
 import jsonpickle
 import numpy as np
-import string
 from collections import deque
-import pandas as pd
 
 # Import required classes from datamodel
 from datamodel import Listing, Observation, Order, OrderDepth, ProsperityEncoder, Symbol, Trade, TradingState, UserId
@@ -123,71 +121,29 @@ logger = Logger()
 # Trader algorithm class
 class Trader:
     def __init__(self):
-        self.has_plotted = False
-        self.final_timestamp = 10000
-        # Mean reversion parameters
-        self.squid_ma_long = 15  # Long-term moving average period (mean to revert to)
-        self.squid_z_threshold = 2.1 # Z-score threshold for entry
-
-        # Price history for each product
+        # Mean reversion parameters for SQUID_INK
+        self.squid_ma_window = 22         # Window for calculating moving average
+        self.squid_entry_threshold = 2.68  # Z-score threshold for entry
+        self.squid_exit_threshold = 0.53   # Z-score threshold for exit
+        self.squid_stop_loss_threshold = 4.53  # Z-score threshold for stop loss
+        self.squid_price_stop_loss_pct = 0.005349  # Price-based stop-loss percentage (0.5%)
+        self.squid_trend_window = 73      # Window for trend detection
+        self.squid_trend_threshold = 0.029  # Trend strength to avoid trading against
+        self.squid_trade_cooldown = 2     # Minimum ticks between trades
+        self.squid_volatility_lookback = 74  # Period for volatility calculation
+        
+        # Price history 
         self.price_history = {
-            "RAINFOREST_RESIN": deque(maxlen=50),
-            "KELP": deque(maxlen=50),
-            "SQUID_INK": deque(maxlen=300)
+            "SQUID_INK": deque(maxlen=300)  # Store up to 300 price points
         }
         
         # Trade state tracking
         self.trade_state = {
             "SQUID_INK": {
-                "positions": [],
-                "last_trade_time": 0,
-                "trade_cooldown": 1
+                "positions": [],  # For tracking individual positions
+                "last_trade_time": 0
             }
         }
-        
-        
-    def calculate_mid_price(self, order_depth):
-        """Calculate the mid price from the order book"""
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return None
-            
-        best_bid = max(order_depth.buy_orders.keys())
-        best_ask = min(order_depth.sell_orders.keys())
-        
-        return (best_bid + best_ask) / 2
-    
-    def calculate_moving_average(self, prices, period):
-        """Calculate moving average of the given period"""
-        if len(prices) < period:
-            return None
-        return sum(prices[-period:]) / period
-    
-    def calculate_exponential_moving_average(self, prices: List[float], period: int) -> float:
-        """Calculate the exponential moving average (EMA) using the given decay (alpha)."""
-        decay = 2 / (period + 1)
-        if not prices:
-            return None
-        ema = prices[0]
-        for price in prices[1:]:
-            ema = decay * price + (1 - decay) * ema
-        return ema
-    
-    def calculate_z_score(self, current_price, prices, period):
-        """Calculate z-score (deviation from mean in standard deviations)"""
-        if len(prices) < period:
-            return 0
-            
-        # Calculate moving average
-        ma = self.calculate_exponential_moving_average(prices, period)
-        
-        # Calculate standard deviation
-        variance = sum((p - ma) ** 2 for p in prices[-period:]) / period
-        std_dev = math.sqrt(variance) if variance > 0 else 1  # Avoid division by zero
-        
-        # Calculate z-score
-        z_score = (current_price - ma) / std_dev
-        
-        return z_score, ma
     
     def calculate_ema_z_score(self, current_price: float, prices: List[float], period: int) -> Tuple[float, float]:
         """
@@ -203,198 +159,44 @@ class Trader:
 
         # Step through prices to compute EMA and exponentially weighted variance
         for price in prices[1:]:
-            prev_ema = ema
             ema = alpha * price + (1 - alpha) * ema
-            deviation = price - prev_ema
+            deviation = price - ema
             ew_var = alpha * (deviation ** 2) + (1 - alpha) * ew_var
 
-        std_dev = math.sqrt(ew_var) if ew_var > 0 else 1.0  # Avoid division by zero
+        std_dev = math.sqrt(ew_var) if ew_var > 0 else 0.0001  # Avoid division by zero
 
         z_score = (current_price - ema) / std_dev
         return z_score, ema
-
-    def rainforest_resin_orders(
-        self,
-        order_depth: OrderDepth,
-        fair_value: int,
-        width: int,
-        position: int,
-        position_limit: int,
-    ) -> List[Order]:
-        orders: List[Order] = []
-        buy_order_volume = 0
-        sell_order_volume = 0
-
-        # Safety check for order book
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return []
-
-        # Select levels from the order depth
-        aaf = [price for price in order_depth.sell_orders.keys() if price > fair_value + 1]
-        baaf = min(aaf) if aaf else fair_value + 2
-        bbf = [price for price in order_depth.buy_orders.keys() if price < fair_value - 1]
-        bbbf = max(bbf) if bbf else fair_value - 2
-
-        best_ask = min(order_depth.sell_orders.keys())
-        best_ask_amount = -order_depth.sell_orders[best_ask]
-        if best_ask < fair_value:
-            quantity = min(best_ask_amount, position_limit - position)
-            if quantity > 0:
-                orders.append(Order("RAINFOREST_RESIN", best_ask, quantity))
-                buy_order_volume += quantity
-
-        best_bid = max(order_depth.buy_orders.keys())
-        best_bid_amount = order_depth.buy_orders[best_bid]
-        if best_bid > fair_value:
-            quantity = min(best_bid_amount, position_limit + position)
-            if quantity > 0:
-                orders.append(Order("RAINFOREST_RESIN", best_bid, -quantity))
-                sell_order_volume += quantity
-
-        buy_order_volume, sell_order_volume = self.clear_position_order(
-            orders,
-            order_depth,
-            position,
-            position_limit,
-            "RAINFOREST_RESIN",
-            buy_order_volume,
-            sell_order_volume,
-            fair_value,
-            1,
-        )
-
-        buy_quantity = position_limit - (position + buy_order_volume)
-        if buy_quantity > 0:
-            orders.append(Order("RAINFOREST_RESIN", bbbf + 1, buy_quantity))
-
-        sell_quantity = position_limit + (position - sell_order_volume)
-        if sell_quantity > 0:
-            orders.append(Order("RAINFOREST_RESIN", baaf - 1, -sell_quantity))
-
-        return orders
-
-    def clear_position_order(
-        self,
-        orders: List[Order],
-        order_depth: OrderDepth,
-        position: int,
-        position_limit: int,
-        product: str,
-        buy_order_volume: int,
-        sell_order_volume: int,
-        fair_value: float,
-        width: int,
-    ) -> Tuple[int, int]:
-        position_after_take = position + buy_order_volume - sell_order_volume
-        fair_for_bid = math.floor(fair_value)
-        fair_for_ask = math.ceil(fair_value)
-
-        buy_quantity = position_limit - (position + buy_order_volume)
-        sell_quantity = position_limit + (position - sell_order_volume)
-
-        if position_after_take > 0:
-            if fair_for_ask in order_depth.buy_orders:
-                clear_quantity = min(order_depth.buy_orders[fair_for_ask], position_after_take)
-                sent_quantity = min(sell_quantity, clear_quantity)
-                orders.append(Order(product, fair_for_ask, -abs(sent_quantity)))
-                sell_order_volume += abs(sent_quantity)
-
-        if position_after_take < 0:
-            if fair_for_bid in order_depth.sell_orders:
-                clear_quantity = min(abs(order_depth.sell_orders[fair_for_bid]), abs(position_after_take))
-                sent_quantity = min(buy_quantity, clear_quantity)
-                orders.append(Order(product, fair_for_bid, abs(sent_quantity)))
-                buy_order_volume += abs(sent_quantity)
-
-        return buy_order_volume, sell_order_volume
-
-    def kelp_fair_value(self, order_depth: OrderDepth, method="mid_price", min_vol=0) -> float:
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return None
-            
-        if method == "mid_price":
-            best_ask = min(order_depth.sell_orders.keys())
-            best_bid = max(order_depth.buy_orders.keys())
-            mid_price = (best_ask + best_bid) / 2
-            return mid_price
-        elif method == "mid_price_with_vol_filter":
-            if (
-                len([price for price in order_depth.sell_orders.keys() if abs(order_depth.sell_orders[price]) >= min_vol]) == 0
-                or len([price for price in order_depth.buy_orders.keys() if abs(order_depth.buy_orders[price]) >= min_vol]) == 0
-            ):
-                best_ask = min(order_depth.sell_orders.keys())
-                best_bid = max(order_depth.buy_orders.keys())
-                mid_price = (best_ask + best_bid) / 2
-                return mid_price
-            else:
-                best_ask = min([price for price in order_depth.sell_orders.keys() if abs(order_depth.sell_orders[price]) >= min_vol])
-                best_bid = max([price for price in order_depth.buy_orders.keys() if abs(order_depth.buy_orders[price]) >= min_vol])
-                mid_price = (best_ask + best_bid) / 2
-                return mid_price
-
-    def kelp_orders(
-        self,
-        order_depth: OrderDepth,
-        timespan: int,
-        width: float,
-        kelp_take_width: float,
-        position: int,
-        position_limit: int,
-    ) -> List[Order]:
-        orders: List[Order] = []
-        buy_order_volume = 0
-        sell_order_volume = 0
-
-        # Safety check for order book
-        if not order_depth.buy_orders or not order_depth.sell_orders:
-            return []
-
-        # Dynamic volume filter based on order book averages
-        avg_sell_volume = sum(abs(order_depth.sell_orders[price]) for price in order_depth.sell_orders) / len(order_depth.sell_orders)
-        avg_buy_volume = sum(abs(order_depth.buy_orders[price]) for price in order_depth.buy_orders) / len(order_depth.buy_orders)
-        vol = math.floor(min(avg_sell_volume, avg_buy_volume))
-        logger.print("Volume filter set to: ", vol)
-        fair_value = self.kelp_fair_value(order_depth, method="mid_price_with_vol_filter", min_vol=vol)
+    
+    def detect_trend(self, prices: List[float], period: int) -> float:
+        """Detect trend using linear regression slope"""
+        if len(prices) < period:
+            return 0
         
-        # Update KELP price history
-        if fair_value is not None:
-            self.price_history["KELP"].append(fair_value)
-
-        # Determine resting order prices
-        aaf = [price for price in order_depth.sell_orders.keys() if price > fair_value + 1]
-        baaf = min(aaf) if aaf else fair_value + 2
-        bbf = [price for price in order_depth.buy_orders.keys() if price < fair_value - 1]
-        bbbf = max(bbf) if bbf else fair_value - 2
-
-        best_ask = min(order_depth.sell_orders.keys())
-        best_ask_amount = -order_depth.sell_orders[best_ask]
-        if best_ask < fair_value:
-            quantity = min(best_ask_amount, position_limit - position)
-            if quantity > 0:
-                orders.append(Order("KELP", best_ask, quantity))
-                buy_order_volume += quantity
-
-        best_bid = max(order_depth.buy_orders.keys())
-        best_bid_amount = order_depth.buy_orders[best_bid]
-        if best_bid > fair_value:
-            quantity = min(best_bid_amount, position_limit + position)
-            if quantity > 0:
-                orders.append(Order("KELP", best_bid, -quantity))
-                sell_order_volume += quantity
-
-        buy_order_volume, sell_order_volume = self.clear_position_order(
-            orders, order_depth, position, position_limit, "KELP", buy_order_volume, sell_order_volume, fair_value, 1
-        )
-
-        buy_quantity = position_limit - (position + buy_order_volume)
-        if buy_quantity > 0:
-            orders.append(Order("KELP", bbbf + 1, buy_quantity))
-
-        sell_quantity = position_limit + (position - sell_order_volume)
-        if sell_quantity > 0:
-            orders.append(Order("KELP", baaf - 1, -sell_quantity))
-
-        return orders
+        # Simple linear regression slope estimation
+        x = np.array(range(period))
+        y = np.array(prices[-period:])
+        
+        # Calculate slope using least squares formula
+        n = len(x)
+        slope = (n * np.sum(x*y) - np.sum(x)*np.sum(y)) / (n * np.sum(x*x) - np.sum(x)**2)
+        
+        # Normalize by average price to get percentage move
+        avg_price = np.mean(y)
+        normalized_slope = slope * period / avg_price if avg_price != 0 else 0
+        
+        return normalized_slope
+    
+    def calculate_volatility(self, prices: List[float], period: int) -> float:
+        """Calculate price volatility as standard deviation of returns"""
+        if len(prices) < period + 1:
+            return 0.01  # Default volatility estimate
+        
+        # Calculate percentage returns
+        returns = [prices[i]/prices[i-1] - 1 for i in range(1, len(prices))][-period:]
+        
+        # Standard deviation of returns
+        return np.std(returns) if len(returns) > 0 else 0.01
     
     def calculate_order_book_imbalance(self, order_depth: OrderDepth) -> float:
         """Calculate order book imbalance as a ratio of buy orders to sell orders"""
@@ -410,12 +212,12 @@ class Trader:
         imbalance = (total_buy_volume - total_sell_volume) / (total_buy_volume + total_sell_volume)
         
         return imbalance
-
+    
     def squid_ink_mean_reversion(
         self, order_depth: OrderDepth, symbol: str, position: int, position_limit: int, timestamp: int
     ) -> List[Order]:
         """Mean reversion strategy for SQUID_INK"""
-        orders: List[Order] = []
+        orders = []
         
         # Safety check for order book
         if not order_depth.buy_orders or not order_depth.sell_orders:
@@ -427,90 +229,98 @@ class Trader:
         mid_price = (best_bid + best_ask) / 2
         spread = best_ask - best_bid
         
+        # Calculate order book imbalance
         order_book_imbalance = self.calculate_order_book_imbalance(order_depth)
-    
+        
         # Update price history
         self.price_history["SQUID_INK"].append(mid_price)
         prices = list(self.price_history["SQUID_INK"])
         
-        # Need at least enough history to calculate metrics
-        if len(prices) < self.squid_ma_long:
-            logger.print(f"Building price history for SQUID_INK: {len(prices)}/{self.squid_ma_long}")
+        # Need enough history
+        if len(prices) < self.squid_ma_window:
+            logger.print(f"Building price history: {len(prices)}/{self.squid_ma_window}")
             return []
         
-        # Calculate moving averages
-        ma_long = self.calculate_exponential_moving_average(prices, self.squid_ma_long)
+        # Calculate z-score using exponentially weighted method
+        z_score, ema = self.calculate_ema_z_score(mid_price, prices, self.squid_ma_window)
         
-        # Calculate z-score - how far current price deviates from long-term mean
-        z_score, _ = self.calculate_ema_z_score(mid_price, prices, self.squid_ma_long)
-        _, ema = self.calculate_ema_z_score(mid_price, prices, self.squid_ma_long)
- 
-        logger.print(f"SQUID_INK price history: {prices[-10:]}")
-        logger.print(f"SQUID_INK order book imbalance: {order_book_imbalance}")
-        # Log current metrics
-        logger.print(f"SQUID_INK: price={mid_price}, MA(long)={ma_long:.2f}, z-score={z_score:.2f}, position={position}")
+        # Detect trend 
+        trend = self.detect_trend(prices, self.squid_trend_window)
+        
+        # Calculate volatility for position sizing
+        volatility = self.calculate_volatility(prices, self.squid_volatility_lookback)
+        
+        # Log market metrics
+        logger.print(f"SQUID_INK: price={mid_price:.2f}, EMA={ema:.2f}, z-score={z_score:.2f}, trend={trend:.4f}, vol={volatility:.4f}")
+        logger.print(f"SQUID_INK: order book imbalance: {order_book_imbalance:.4f}, spread: {spread}")
         
         # Get trade state
         trade_state = self.trade_state["SQUID_INK"]
-        cooldown_elapsed = timestamp - trade_state["last_trade_time"] >= trade_state["trade_cooldown"]
+        cooldown_elapsed = timestamp - trade_state["last_trade_time"] >= self.squid_trade_cooldown
         
-        # Mean reversion trading logic
+        # Execute mean reversion trades
         if cooldown_elapsed:
-            # Strong mean reversion signal - price significantly above long-term mean while trade imbalance is negative
-            if z_score > self.squid_z_threshold and position > -position_limit * 0.8:
-                # Calculate size based on signal strength - stronger signal = larger position
-                signal_strength = min(abs(z_score) / 3.0, 1.0)  # Scale between 0-1
-                size = max(1, int(position_limit * signal_strength * 0.8))  # Use up to 20% of position limit
-                sell_quantity = min(size, position_limit + position)
-                
-                if sell_quantity > 0:
-                    # Sell at current bid (aggressive) to ensure execution
-                    orders.append(Order(symbol, best_bid, -sell_quantity))
-                    logger.print(f"SQUID_INK: SELLING {sell_quantity} at {best_bid} (z-score: {z_score:.2f}, mean reversion)")
+            # Only trade if not against a strong trend
+            trade_with_trend = (trend < self.squid_trend_threshold and z_score > self.squid_entry_threshold) or \
+                               (trend > -self.squid_trend_threshold and z_score < -self.squid_entry_threshold)
+                               
+            if trade_with_trend:
+                if z_score > self.squid_entry_threshold and position > -position_limit * 0.8:
+                    # Price is too high - SELL signal
+                    sell_size = self.calc_position_size(abs(z_score), position_limit, volatility)
+                    sell_quantity = min(sell_size, position_limit + position)
                     
-                    # Record trade
-                    trade_state["positions"].append({
-                        "type": "SHORT",
-                        "entry_price": best_bid,
-                        "quantity": sell_quantity,
-                        "entry_time": timestamp,
-                        "z_score": z_score,
-                        "target_price": ema  # Target the long-term mean
-                    })
-                    trade_state["last_trade_time"] = timestamp
-            
-            # Strong mean reversion signal - price significantly below long-term mean
-            elif z_score < -self.squid_z_threshold and position < position_limit * 0.8:
-                # Calculate size based on signal strength
-                signal_strength = min(abs(z_score) / 3.0, 1.0)  # Scale between 0-1
-                size = max(1, int(position_limit * signal_strength * 0.8))  # Use up to 20% of position limit
-                buy_quantity = min(size, position_limit - position)
-                
-                if buy_quantity > 0:
-                    # Buy at current ask (aggressive) to ensure execution
-                    orders.append(Order(symbol, best_ask, buy_quantity))
-                    logger.print(f"SQUID_INK: BUYING {buy_quantity} at {best_ask} (z-score: {z_score:.2f}, mean reversion)")
+                    if sell_quantity > 0:
+                        orders.append(Order(symbol, best_bid, -sell_quantity))
+                        logger.print(f"SQUID_INK: SELLING {sell_quantity} at {best_bid} (z-score: {z_score:.2f}, mean reversion)")
+                        
+                        # Record trade
+                        trade_state["positions"].append({
+                            "type": "SHORT",
+                            "entry_price": best_bid,
+                            "quantity": sell_quantity,
+                            "entry_time": timestamp,
+                            "z_score": z_score,
+                            "target_price": ema  # Target the EMA
+                        })
+                        trade_state["last_trade_time"] = timestamp
+                        
+                elif z_score < -self.squid_entry_threshold and position < position_limit * 0.8:
+                    # Price is too low - BUY signal
+                    buy_size = self.calc_position_size(abs(z_score), position_limit, volatility)
+                    buy_quantity = min(buy_size, position_limit - position)
                     
-                    # Record trade
-                    trade_state["positions"].append({
-                        "type": "LONG",
-                        "entry_price": best_ask,
-                        "quantity": buy_quantity,
-                        "entry_time": timestamp,
-                        "z_score": z_score,
-                        "target_price": ema  # Target the long-term mean
-                    })
-                    trade_state["last_trade_time"] = timestamp
+                    if buy_quantity > 0:
+                        orders.append(Order(symbol, best_ask, buy_quantity))
+                        logger.print(f"SQUID_INK: BUYING {buy_quantity} at {best_ask} (z-score: {z_score:.2f}, mean reversion)")
+                        
+                        # Record trade
+                        trade_state["positions"].append({
+                            "type": "LONG",
+                            "entry_price": best_ask,
+                            "quantity": buy_quantity,
+                            "entry_time": timestamp,
+                            "z_score": z_score,
+                            "target_price": ema  # Target the EMA
+                        })
+                        trade_state["last_trade_time"] = timestamp
         
-        # Manage existing positions - take profit or reduce risk
+        # Manage existing positions - take profit, stop loss, or reduce risk
         if trade_state["positions"]:
             # Check each position
             new_positions = []
             for pos in trade_state["positions"]:
                 if pos["type"] == "LONG":
-                    # Price has reverted toward mean - take profit
-                    if mid_price >= pos["target_price"] or z_score >= -0.5:
-                        # Sell to close the long position
+                    # STOP LOSS CONDITION - z-score moved more negative or price dropped too much
+                    if z_score < -self.squid_stop_loss_threshold or mid_price < pos["entry_price"] * (1 - self.squid_price_stop_loss_pct):
+                        # Sell to close the long position - stop loss
+                        sell_quantity = pos["quantity"]
+                        orders.append(Order(symbol, best_bid, -sell_quantity))
+                        logger.print(f"SQUID_INK: STOP LOSS - Selling {sell_quantity} at {best_bid} (z-score: {z_score:.2f})")
+                    
+                    # PROFIT TAKING - Price reverted toward mean 
+                    elif mid_price >= pos["target_price"] or z_score >= -self.squid_exit_threshold:
+                        # Sell to close the long position - take profit
                         sell_quantity = pos["quantity"]
                         orders.append(Order(symbol, best_bid, -sell_quantity))
                         logger.print(f"SQUID_INK: PROFIT TAKING - Selling {sell_quantity} at {best_bid} (target reached)")
@@ -519,9 +329,16 @@ class Trader:
                         new_positions.append(pos)
                 
                 elif pos["type"] == "SHORT":
-                    # Price has reverted toward mean - take profit
-                    if mid_price <= pos["target_price"] or z_score <= 0.5:
-                        # Buy to close the short position
+                    # STOP LOSS CONDITION - z-score moved more positive or price increased too much
+                    if z_score > self.squid_stop_loss_threshold or mid_price > pos["entry_price"] * (1 + self.squid_price_stop_loss_pct):
+                        # Buy to close the short position - stop loss
+                        buy_quantity = pos["quantity"]
+                        orders.append(Order(symbol, best_ask, buy_quantity))
+                        logger.print(f"SQUID_INK: STOP LOSS - Buying {buy_quantity} at {best_ask} (z-score: {z_score:.2f})")
+                    
+                    # PROFIT TAKING - Price reverted toward mean
+                    elif mid_price <= pos["target_price"] or z_score <= self.squid_exit_threshold:
+                        # Buy to close the short position - take profit
                         buy_quantity = pos["quantity"]
                         orders.append(Order(symbol, best_ask, buy_quantity))
                         logger.print(f"SQUID_INK: PROFIT TAKING - Buying {buy_quantity} at {best_ask} (target reached)")
@@ -549,69 +366,53 @@ class Trader:
                     logger.print(f"SQUID_INK: RISK MANAGEMENT - Reducing short by {reduce_quantity} at {best_ask}")
         
         return orders
-    
-    def plot_squid_ink_price_with_short_ma(self):
-        prices = list(self.price_history["SQUID_INK"])
-        if not prices:
-            print("No price history to plot.")
-            return
 
-        ticks = list(range(len(prices)))
-        short_period = self.squid_ma_long
-
-        # Recompute the full EMA series using your logic
-        decay = 2 / (short_period + 1)
-        ema_series = [prices[0]]
-        for price in prices[1:]:
-            ema = decay * price + (1 - decay) * ema_series[-1]
-            ema_series.append(ema)
-
+    def calc_position_size(self, signal_strength: float, position_limit: int, volatility: float) -> int:
+        """Calculate position size based on signal strength and volatility"""
+        # Base size (30% of position limit)
+        base_size = int(position_limit * 0.3)
+        
+        # Adjust for signal strength (stronger signal = larger position)
+        signal_adjustment = min(1.5, 1 + signal_strength/3)
+        
+        # Adjust for volatility (higher volatility = smaller position)
+        volatility_factor = max(0.5, min(1.5, 1 / (volatility * 20)))
+        
+        # Calculate final size
+        size = int(base_size * signal_adjustment * volatility_factor)
+        
+        # Cap at 80% of position limit
+        capped_size = min(size, int(position_limit * 0.8))
+        
+        return max(1, capped_size)  # Ensure at least 1 unit
+        
     def run(self, state: TradingState) -> Tuple[Dict[Symbol, List[Order]], int, str]:
+        """Main method called by the trading platform"""
         result: Dict[Symbol, List[Order]] = {}
         
         # Position limits
         position_limits = {
-            "RAINFOREST_RESIN": 50,
-            "KELP": 50,
             "SQUID_INK": 50
         }
         
-
         timestamp = state.timestamp
         
-        
-        # RAINFOREST_RESIN orders
-        if "RAINFOREST_RESIN" in state.order_depths:
-            rainforest_resin_position = state.position.get("RAINFOREST_RESIN", 0)
-            
-            # Update price history for RAINFOREST_RESIN
-            if state.order_depths["RAINFOREST_RESIN"].buy_orders and state.order_depths["RAINFOREST_RESIN"].sell_orders:
-                mid_price = self.calculate_mid_price(state.order_depths["RAINFOREST_RESIN"])
-                if mid_price:
-                    self.price_history["RAINFOREST_RESIN"].append(mid_price)
+        # If we have saved state, restore it
+        if state.traderData:
+            try:
+                saved_data = jsonpickle.decode(state.traderData)
                 
-            rainforest_resin_orders = self.rainforest_resin_orders(
-                state.order_depths["RAINFOREST_RESIN"],
-                10000,  # Fixed fair value for RAINFOREST_RESIN
-                2,      # Width
-                rainforest_resin_position,
-                position_limits["RAINFOREST_RESIN"]
-            )
-            result["RAINFOREST_RESIN"] = rainforest_resin_orders
-
-        # KELP orders
-        if "KELP" in state.order_depths:
-            kelp_position = state.position.get("KELP", 0)
-            kelp_orders = self.kelp_orders(
-                state.order_depths["KELP"],
-                10,     # Timespan
-                4,      # Width
-                1.35,   # Take width
-                kelp_position,
-                position_limits["KELP"]
-            )
-            result["KELP"] = kelp_orders
-
+                # Restore price history
+                for symbol, history in saved_data.get("price_history", {}).items():
+                    if symbol in self.price_history:
+                        self.price_history[symbol] = deque(history, maxlen=self.price_history[symbol].maxlen)
+                    
+                # Restore trade state
+                if "trade_state" in saved_data:
+                    self.trade_state = saved_data["trade_state"]
+            except Exception as e:
+                logger.print(f"Error restoring saved state: {e}")
+        
         # SQUID_INK orders with mean reversion strategy
         if "SQUID_INK" in state.order_depths:
             squid_position = state.position.get("SQUID_INK", 0)
@@ -625,20 +426,14 @@ class Trader:
             if squid_orders:
                 result["SQUID_INK"] = squid_orders
 
-        # Update our trader data for persistence
+        # Update trader data for persistence
         trader_data = {
             "price_history": {k: list(v) for k, v in self.price_history.items()},
             "trade_state": self.trade_state
         }
 
         traderData = jsonpickle.encode(trader_data)
-
-        ##
-        #if timestamp > self.final_timestamp and not self.has_plotted:
-           # print(f"Plotting at final tick {state.timestamp}")
-          #  self.plot_squid_ink_price_with_short_ma()
-           # self.has_plotted = True#
-
-        conversions = 1
+        
+        conversions = 0
         logger.flush(state, result, conversions, traderData)
         return result, conversions, traderData
