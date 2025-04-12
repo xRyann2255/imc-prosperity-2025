@@ -156,6 +156,7 @@ class Trader:
         }
         
         self.basket1_margin = 10  # Margin for basket1 arbitrage
+        self.basket2_margin = 10  # Margin for basket2 arbitrage
         
     def calculate_mid_price(self, order_depth):
         """Calculate the mid price from the order book"""
@@ -399,11 +400,11 @@ class Trader:
 
         buy_quantity = position_limit - (position + buy_order_volume)
         if buy_quantity > 0:
-            orders.append(Order("KELP", bbbf + 1, buy_quantity))
+            orders.append(Order("KELP", int(bbbf + 1), buy_quantity))
 
         sell_quantity = position_limit + (position - sell_order_volume)
         if sell_quantity > 0:
-            orders.append(Order("KELP", baaf - 1, -sell_quantity))
+            orders.append(Order("KELP", int(baaf - 1), -sell_quantity))
 
         return orders
     
@@ -711,6 +712,129 @@ class Trader:
 
         return basket_orders, croissant_orders, jam_orders, djembe_orders
     
+    def basket2_arbitrage_order(self, state: TradingState) -> List[Order]:
+        basket_orders: List[Order] = []
+        croissant_orders: List[Order] = []
+        jam_orders: List[Order] = []
+
+        # Arbitrage Symbols
+        required_symbols = ["PICNIC_BASKET2", "CROISSANTS", "JAMS"]
+        for symbol in required_symbols:
+            if symbol not in state.order_depths:
+                logger.print(f"Order depth missing for {symbol}")
+                return basket_orders, croissant_orders, jam_orders
+
+            depth = state.order_depths[symbol]
+            if not depth.buy_orders or not depth.sell_orders:
+                logger.print(f"Incomplete order depth for {symbol}")
+                return basket_orders, croissant_orders, jam_orders
+            
+        # Get order depths for each product
+        depth_basket = state.order_depths["PICNIC_BASKET2"]
+        depth_croissant = state.order_depths["CROISSANTS"]
+        depth_jam = state.order_depths["JAMS"]
+
+        # Determine best bid/ask for each product
+        basket_bid = max(depth_basket.buy_orders.keys())
+        basket_ask = min(depth_basket.sell_orders.keys())
+
+        croissant_bid = max(depth_croissant.buy_orders.keys())
+        croissant_ask = min(depth_croissant.sell_orders.keys())
+
+        jam_bid = max(depth_jam.buy_orders.keys())
+        jam_ask = min(depth_jam.sell_orders.keys())
+
+        # Arbitrage!
+        # For basket overpriced (sell basket, buy components):
+        margin_overpriced = basket_bid - (4 * croissant_ask + 2 * jam_ask)
+        # For basket underpriced (buy basket, sell components):
+        margin_underpriced = (4 * croissant_bid + 2 * jam_bid) - basket_ask
+
+        logger.print("Basket2 arbitrage margins:",
+                     f"overpriced margin = {margin_overpriced:.2f}",
+                     f"underpriced margin = {margin_underpriced:.2f}")
+        
+        # Get available volumes from order books at these price levels.
+        # For selling basket (using bid price) and buying components (using ask price)
+        available_basket_sell = depth_basket.buy_orders[basket_bid]
+        available_croissant_buy = -depth_croissant.sell_orders[croissant_ask]
+        available_jam_buy = -depth_jam.sell_orders[jam_ask]
+
+        # For buying basket (using ask price) and selling components (using bid price)
+        available_basket_buy = -depth_basket.sell_orders[basket_ask]
+        available_croissant_sell = depth_croissant.buy_orders[croissant_bid]
+        available_jam_sell = depth_jam.buy_orders[jam_bid]
+
+        # Current positions
+        pos_basket = state.position.get("PICNIC_BASKET2", 0)
+        pos_croissant = state.position.get("CROISSANTS", 0)
+        pos_jam = state.position.get("JAMS", 0)
+
+        # Define position limits (as per provided limits)
+        limit_basket = self.position_limits["PICNIC_BASKET2"]
+        limit_croissant = self.position_limits["CROISSANTS"]
+        limit_jam = self.position_limits["JAMS"]
+
+        trade_quantity = 0  # number of baskets to arbitrage
+
+        # Case 1: Basket is overpriced. Sell basket at basket_bid, buy components at their ask.
+        if margin_overpriced > self.basket2_margin:
+            # Determine maximum volume available from the order books (per basket unit).
+            n_max_book = min(
+                available_basket_sell,
+                available_croissant_buy // 4,
+                available_jam_buy // 2
+            )
+
+            # Determine position constraints for executing the arbitrage:
+            # For basket: selling n units implies new position: pos_basket - n must be >= -limit_basket.
+            n_limit_basket = pos_basket + limit_basket  # n <= pos_basket + limit (if pos is positive, you can sell more)
+            # For components: buying increases their positions.
+            n_limit_croissant = (limit_croissant - pos_croissant) // 4
+            n_limit_jam = (limit_jam - pos_jam) // 2
+
+            n_max_pos = min(n_limit_basket, n_limit_croissant, n_limit_jam)
+            trade_quantity = min(n_max_book, n_max_pos)
+
+            if trade_quantity > 0:
+                logger.print(f"Executing overpriced arbitrage: Sell {trade_quantity} baskets at {basket_bid} and buy underlying components")
+                # Sell the basket
+                basket_orders.append(Order("PICNIC_BASKET2", basket_bid, -trade_quantity))
+                # Buy the components in the appropriate ratios
+                croissant_orders.append(Order("CROISSANTS", croissant_ask, trade_quantity * 4))
+                jam_orders.append(Order("JAMS", jam_ask, trade_quantity * 2))
+        # Case 2: Basket is underpriced. Buy basket at basket_ask, sell components at their bid.
+        elif margin_underpriced > self.basket2_margin:
+            n_max_book = min(
+                available_basket_buy,
+                available_croissant_sell // 4,
+                available_jam_sell // 2
+            )
+            # Determine position constraints for executing the arbitrage:
+            # For basket: buying n units implies new position: pos_basket + n must be <= limit_basket.
+            n_limit_basket = limit_basket - pos_basket
+            # For components: selling reduces their positions.
+            n_limit_croissant = (pos_croissant + limit_croissant) // 4
+            n_limit_jam = (pos_jam + limit_jam) // 2
+            n_max_pos = min(n_limit_basket, n_limit_croissant, n_limit_jam)
+            trade_quantity = min(n_max_book, n_max_pos)
+
+            if trade_quantity > 0:
+                logger.print(f"Executing underpriced arbitrage: Buy {trade_quantity} baskets at {basket_ask} and sell underlying components")
+                # Buy the basket
+                basket_orders.append(Order("PICNIC_BASKET2", basket_ask, trade_quantity))
+                # Sell the components in the appropriate ratios
+                croissant_orders.append(Order("CROISSANTS", croissant_bid, -trade_quantity * 4))
+                jam_orders.append(Order("JAMS", jam_bid, -trade_quantity * 2))
+
+        else:
+            # logger.print("No basket2 arbitrage opportunity detected.")
+            pass
+
+        return basket_orders, croissant_orders, jam_orders
+
+
+
 
     def run(self, state: TradingState) -> Tuple[Dict[Symbol, List[Order]], int, str]:
         result: Dict[Symbol, List[Order]] = {}
@@ -783,6 +907,13 @@ class Trader:
             result["CROISSANTS"] = croissant_orders
             result["JAMS"] = jam_orders
             result["DJEMBES"] = djembe_orders
+
+        basket2_orders, croissant_orders, jam_orders = self.basket2_arbitrage_order(state)
+        if basket2_orders and croissant_orders and jam_orders:
+            logger.print("Executing basket2 arbitrage orders")
+            result["PICNIC_BASKET2"] = basket2_orders
+            result["CROISSANTS"] = croissant_orders
+            result["JAMS"] = jam_orders
         
         # Update our trader data for persistence
         trader_data = {
