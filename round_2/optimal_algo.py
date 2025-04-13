@@ -427,29 +427,377 @@ class SquidInkDeviationStrategy(MarketMakingStrategy):
                 price = max(min_sell_price, popular_sell_price - 1)
                 self.sell(round(price), to_sell)
 
+# --- Updated BasketDeviationStrategy that enforces full hedgeability ---
+class BasketDeviationStrategy(Strategy):
+    def __init__(self, basket_symbol: str, component_weights: dict, limit: int,
+                 window_size: int = 45, z_threshold: float = 2.0, underlying_limits: dict = None) -> None:
+        """
+        basket_symbol: The symbol for the basket product (e.g. "PICNIC_BASKET1")
+        component_weights: Dict mapping underlying names to the per-basket quantity
+                           e.g. {"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1}
+        limit: Position limit for the basket.
+        window_size: Window size used for computing the rolling spread history.
+        z_threshold: When the spread’s z-score crosses this value, true_value is adjusted.
+        underlying_limits: A dict mapping each underlying product (e.g. "CROISSANTS") to its position limit.
+        """
+        super().__init__(basket_symbol, limit)
+        self.component_weights = component_weights  
+        self.window_size = window_size
+        self.z_threshold = z_threshold
+        self.spread_history = deque(maxlen=window_size)
+        # underlying_limits is required to know what hedge capacity is available.
+        self.underlying_limits = underlying_limits if underlying_limits is not None else {}
+
+    def compute_market_mid(self, order_depth: OrderDepth) -> float:
+        # Compute the mid price from the basket's order book.
+        if order_depth.buy_orders and order_depth.sell_orders:
+            best_bid = max(order_depth.buy_orders.keys())
+            best_ask = min(order_depth.sell_orders.keys())
+            return (best_bid + best_ask) / 2.0
+        elif order_depth.buy_orders:
+            return max(order_depth.buy_orders.keys())
+        elif order_depth.sell_orders:
+            return min(order_depth.sell_orders.keys())
+        else:
+            return 0.0
+
+    def compute_synthetic_mid(self, state: TradingState) -> float:
+        # Compute synthetic mid price by summing the weighted mid of each component.
+        total_bid = 0.0
+        total_ask = 0.0
+        valid_bid = True
+        valid_ask = True
+        for comp, weight in self.component_weights.items():
+            if comp in state.order_depths:
+                od = state.order_depths[comp]
+                if od.buy_orders:
+                    comp_bid = max(od.buy_orders.keys())
+                else:
+                    valid_bid = False
+                    comp_bid = 0
+                if od.sell_orders:
+                    comp_ask = min(od.sell_orders.keys())
+                else:
+                    valid_ask = False
+                    comp_ask = 0
+                total_bid += weight * comp_bid
+                total_ask += weight * comp_ask
+            else:
+                valid_bid = False
+                valid_ask = False
+        if valid_bid and valid_ask:
+            return (total_bid + total_ask) / 2.0
+        elif valid_bid:
+            return total_bid
+        elif valid_ask:
+            return total_ask
+        else:
+            return 0.0
+
+    def get_true_value(self, state: TradingState) -> int:
+        # Use the synthetic mid as our base true value.
+        synthetic_mid = self.compute_synthetic_mid(state)
+        return round(synthetic_mid)
+    
+    def hedge_cap(self, state: TradingState) -> tuple[float, float]:
+        """
+        Compute the maximum additional basket units that can be bought (positive) or sold (negative)
+        such that the new basket position remains hedgeable by the underlying products.
+        For each underlying u in the basket:
+          - Allowed basket exposure is max_exposure = (underlying_limit[u] / weight[u]).
+          - If current basket position is P, then:
+              For buying:  P + d  <= max_exposure   => d <= max_exposure - P
+              For selling: P + d  >= -max_exposure  => d >= -max_exposure - P
+        We return (allowed_buy, allowed_sell) where allowed_sell is a positive number representing
+        the maximum baskets that can be sold (in absolute terms).
+        """
+        pos_current = state.position.get(self.symbol, 0)
+        allowed_buy = 99999
+        allowed_sell = 99999
+        for comp, weight in self.component_weights.items():
+            if comp not in self.underlying_limits:
+                continue  # If not provided, skip capping for this component.
+            limit_u = self.underlying_limits[comp]
+            max_exposure = limit_u // weight  # Maximum baskets fully hedgeable via this underlying.
+            # For buying baskets (increasing basket position):
+            allowed_buy_for_u = max_exposure - pos_current
+            # For selling baskets (decreasing basket position): we require pos_current + d >= -max_exposure,
+            # so d >= -max_exposure - pos_current; the allowed magnitude is: (-max_exposure - pos_current) in absolute terms.
+            allowed_sell_for_u = pos_current + max_exposure  # (since d is negative, its magnitude is capped by this value)
+            logger.print(f"Underlying: {comp}, Limit: {limit_u}, Weight: {weight}, Allowed Buy: {allowed_buy_for_u}, Allowed Sell: {allowed_sell_for_u}")
+            allowed_buy = min(allowed_buy, allowed_buy_for_u)
+            allowed_sell = min(allowed_sell, allowed_sell_for_u)
+        return allowed_buy, allowed_sell
+
+    def act(self, state: TradingState) -> None:
+        # Ensure the basket order depth is available.
+        if self.symbol not in state.order_depths:
+            return
+
+        basket_od = state.order_depths[self.symbol]
+        basket_mid = self.compute_market_mid(basket_od)
+        synthetic_mid = self.compute_synthetic_mid(state)
+        
+        # Compute the spread between basket market mid and synthetic mid.
+        spread = basket_mid - synthetic_mid
+        self.spread_history.append(spread)
+        
+        # Compute rolling z-score if enough history is present.
+        if len(self.spread_history) >= self.window_size:
+            mean_spread = sum(self.spread_history) / len(self.spread_history)
+            std_spread = (sum((s - mean_spread) ** 2 for s in self.spread_history) / len(self.spread_history)) ** 0.5
+            zscore = (spread - mean_spread) / std_spread if std_spread > 0 else 0
+        else:
+            zscore = 0
+        
+        # Base true value is set to the synthetic mid.
+        true_value = round(synthetic_mid)
+        # Adjust the true value based on the z-score.
+        if zscore > self.z_threshold:
+            true_value -= abs(zscore)
+        elif zscore < -self.z_threshold:
+            true_value += abs(zscore)
+
+        # Standard market-making approach based on current basket order depth.
+        order_depth = basket_od
+        buy_orders = sorted(order_depth.buy_orders.items(), reverse=True)
+        sell_orders = sorted(order_depth.sell_orders.items())
+        current_pos = state.position.get(self.symbol, 0)
+        to_buy = self.limit - current_pos
+        to_sell = self.limit + current_pos
+
+        # Enforce hedgeability: cap the basket trade quantities so the resulting basket position can be hedged.
+        allowed_buy, allowed_sell = self.hedge_cap(state)
+        logger.print(f"Allowed Buy: {allowed_buy}, Allowed Sell: {allowed_sell}")
+        # Only trade up to the hedge cap.
+        to_buy = min(to_buy, allowed_buy)
+        to_sell = min(to_sell, allowed_sell)
+        
+        # Process orders on the sell side to fill a basket buy order.
+        for price, volume in sell_orders:
+            if to_buy > 0 and price <= true_value:
+                quantity = min(to_buy, -volume)
+                self.buy(price, quantity)
+                to_buy -= quantity
+
+        # Process orders on the buy side to fill a basket sell order.
+        for price, volume in buy_orders:
+            if to_sell > 0 and price >= true_value:
+                quantity = min(to_sell, volume)
+                self.sell(price, quantity)
+                to_sell -= quantity
+
+        # If remaining orders exist, send fallback orders.
+        if to_buy > 0:
+            if buy_orders:
+                popular_buy = max(buy_orders, key=lambda tup: tup[1])[0]
+                price = min(true_value, popular_buy + 1)
+            else:
+                price = true_value
+            self.buy(price, to_buy)
+        if to_sell > 0:
+            if sell_orders:
+                popular_sell = min(sell_orders, key=lambda tup: tup[1])[0]
+                price = max(true_value, popular_sell - 1)
+            else:
+                price = true_value
+            self.sell(price, to_sell)
+    
+    def save(self) -> Any:
+        return list(self.spread_history)
+    
+    def load(self, data: Any) -> None:
+        self.spread_history = deque(data, maxlen=self.window_size)
+
+# === Begin BasketHedgeStrategy ===
+class BasketHedgeStrategy(Strategy):
+    def __init__(self, symbol: str, limit: int, basket_recipes: dict) -> None:
+        """
+        basket_recipes: A dict mapping basket symbols to the quantity of this underlying per basket.
+          e.g. for CROISSANT: {"PICNIC_BASKET1": 6, "PICNIC_BASKET2": 4}
+        """
+        super().__init__(symbol, limit)
+        self.basket_recipes = basket_recipes
+
+    def get_target_position(self, state: TradingState) -> int:
+        # Calculate the net exposure from basket positions.
+        # For each basket, multiply its current position by the per-basket amount and sum them.
+        # Then, the hedge target is the negative of that sum.
+        net_exposure = 0
+        for basket_sym, qty_per_basket in self.basket_recipes.items():
+            basket_pos = state.position.get(basket_sym, 0)
+            net_exposure += basket_pos * qty_per_basket
+        return -net_exposure
+
+    def act(self, state: TradingState) -> None:
+        # Compute the target underlying position to fully hedge the basket exposure.
+        target = self.get_target_position(state)
+        # Clip target to within our position limits.
+        target = min(max(target, -self.limit), self.limit)
+        current = state.position.get(self.symbol, 0)
+        delta = target - current
+
+        if delta == 0:
+            # Already perfectly hedged.
+            return
+
+        if self.symbol not in state.order_depths:
+            return  # Nothing to trade on if the order book is absent.
+
+        od = state.order_depths[self.symbol]
+        logger.print(f"Symbol:{self.symbol} Delta: {delta}, Target: {target}, Current: {current}")
+        # If delta > 0, we need to buy underlying; if delta < 0, we need to sell.
+        if delta > 0:
+            # Need to buy 'delta' units; sweep the sell side of the order book.
+            sorted_sell = sorted(od.sell_orders.items())  # ascending prices
+            remaining = delta
+            for price, vol in sorted_sell:
+                # In the sell orders, volume is negative.
+                avail = -vol
+                trade_qty = min(remaining, avail)
+                if trade_qty > 0:
+                    self.buy(price, trade_qty)
+                    remaining -= trade_qty
+                    logger.print(f"Buying {trade_qty} at {price}")
+                    if remaining <= 0:
+                        break
+            # If liquidity is insufficient, place a fallback order.
+            if remaining > 0:
+                fallback_price = sorted_sell[0][0] if sorted_sell else self.get_fallback_price(od)
+                self.buy(fallback_price, remaining)
+        else:
+            # delta < 0, need to sell abs(delta) units; sweep the buy side.
+            remaining = abs(delta)
+            sorted_buy = sorted(od.buy_orders.items(), reverse=True)  # descending prices
+            for price, vol in sorted_buy:
+                avail = vol  # volume is positive for buy orders.
+                trade_qty = min(remaining, avail)
+                if trade_qty > 0:
+                    self.sell(price, trade_qty)
+                    remaining -= trade_qty
+                    logger.print(f"Selling {trade_qty} at {price}")
+                    if remaining <= 0:
+                        break
+            if remaining > 0:
+                fallback_price = sorted_buy[0][0] if sorted_buy else self.get_fallback_price(od)
+                self.sell(fallback_price, remaining)
+
+    def get_fallback_price(self, order_depth: OrderDepth) -> int:
+        # Compute a mid price fallback if no suitable order book orders are available.
+        if order_depth.buy_orders and order_depth.sell_orders:
+            best_bid = max(order_depth.buy_orders.keys())
+            best_ask = min(order_depth.sell_orders.keys())
+            return round((best_bid + best_ask) / 2)
+        elif order_depth.buy_orders:
+            return max(order_depth.buy_orders.keys())
+        elif order_depth.sell_orders:
+            return min(order_depth.sell_orders.keys())
+        else:
+            return 0
+
+    def get_true_value(self, state: TradingState) -> int:
+        # For hedging, the true value isn't used in the same way.
+        if self.symbol in state.order_depths:
+            return self.get_fallback_price(state.order_depths[self.symbol])
+        return 0
+
+    def save(self) -> Any:
+        # This strategy is stateless.
+        return {}
+
+    def load(self, data: Any) -> None:
+        pass
+
+class PicnicBasket1Strategy(Strategy):
+    def __init__(self, symbol: Symbol, components, limit: int, spread=60) -> None:
+        super().__init__(symbol, limit)
+        self.components = components  # Components of the basket and their weights
+        self.spread = spread  # Adjustable spread around fair value
+
+    def act(self, state: TradingState) -> None:
+        fair_value = self.compute_fair_value(state)
+        if fair_value is not None:
+            self.market_make(state, fair_value)
+
+    def compute_fair_value(self, state: TradingState) -> float | None:
+        total_value = 0
+        for symbol, weight in self.components.items():
+            mid_price = self.get_mid_price(state, symbol)
+            if mid_price is None:
+                return None
+            total_value += mid_price * weight
+        return total_value
+
+    def get_mid_price(self, state: TradingState, symbol: Symbol) -> float | None:
+        order_depth = state.order_depths.get(symbol)
+        if not order_depth:
+            return None
+        best_bid = max(order_depth.buy_orders.keys()) if order_depth.buy_orders else None
+        best_ask = min(order_depth.sell_orders.keys()) if order_depth.sell_orders else None
+        return (best_bid + best_ask) / 2 if best_bid is not None and best_ask is not None else None
+
+    def market_make(self, state: TradingState, fair_value: float) -> None:
+        position = state.position.get(self.symbol, 0)
+        order_depth = state.order_depths.get(self.symbol, None)
+        if not order_depth:
+            return
+
+        buy_price = int(fair_value - self.spread + 0)
+        sell_price = int(fair_value + self.spread + 0)
+
+        buy_volume = min(self.limit - position, 20)
+        sell_volume = min(self.limit + position, 20)
+
+        if buy_volume > 0:
+            self.buy(buy_price, buy_volume)
+        if sell_volume > 0:
+            self.sell(sell_price, sell_volume)
+
 class Trader:
     def __init__(self) -> None:
         limits = {
             "RAINFOREST_RESIN": 50,
             "KELP": 50,
             "SQUID_INK": 50,
-            "CROISSANT" : 250,
-            "JAM" : 350,
-            "DJEMBE" : 60,
+            "CROISSANTS" : 250,
+            "JAMS" : 350,
+            "DJEMBES" : 60,
             "PICNIC_BASKET1" : 60,
             "PICNIC_BASKET2" : 100
+        }
+        underlying_limits = {
+            "CROISSANTS": 250,
+            "JAMS": 350,
+            "DJEMBES": 60
         }
 
         self.strategies = {
             "RAINFOREST_RESIN": ResinStrategy("RAINFOREST_RESIN", limits["RAINFOREST_RESIN"]),
             "KELP": KelpStrategy("KELP", limits["KELP"]),
-            "CROISSANT": SquidInkDeviationStrategy("CROISSANT", limits["CROISSANT"], n_days=200, z_high=2.5, z_low=1, profit_margin=9, sell_off_ratio=0.15, entering_aggression=2, take_profit_aggression=0, clearing_aggression=1, high_hold_duration=15000, low_hold_duration=8000, low_trade_ratio=0.5),
-            "JAM": SquidInkDeviationStrategy("JAM", limits["JAM"], n_days=200, z_high=2.5, z_low=1, profit_margin=9, sell_off_ratio=0.15, entering_aggression=2, take_profit_aggression=0, clearing_aggression=1, high_hold_duration=15000, low_hold_duration=8000, low_trade_ratio=0.5),
-            "DJEMBE": SquidInkDeviationStrategy("DJEMBE", limits["DJEMBE"], n_days=200, z_high=2.5, z_low=1, profit_margin=9, sell_off_ratio=0.15, entering_aggression=2, take_profit_aggression=0, clearing_aggression=1, high_hold_duration=15000, low_hold_duration=8000, low_trade_ratio=0.5),
-            "PICNIC_BASKET1": SquidInkDeviationStrategy("PICNIC_BASKET1", limits["PICNIC_BASKET1"], n_days=200, z_high=2.5, z_low=1, profit_margin=9, sell_off_ratio=0.15, entering_aggression=2, take_profit_aggression=0, clearing_aggression=1, high_hold_duration=15000, low_hold_duration=8000, low_trade_ratio=0.5),
-            "PICNIC_BASKET2": SquidInkDeviationStrategy("PICNIC_BASKET2", limits["PICNIC_BASKET2"], n_days=200, z_high=2.5, z_low=1, profit_margin=9, sell_off_ratio=0.15, entering_aggression=2, take_profit_aggression=0, clearing_aggression=1, high_hold_duration=15000, low_hold_duration=8000, low_trade_ratio=0.5),
-            "SQUID_INK": SquidInkDeviationStrategy("SQUID_INK", limits["SQUID_INK"], n_days=220, z_high=2.5, z_low=1.5, profit_margin=9, sell_off_ratio=0.25, entering_aggression=1.4, take_profit_aggression=0, clearing_aggression=1, high_hold_duration=15000, low_hold_duration=8000, low_trade_ratio=0.5),
-            
+            "CROISSANTS": BasketHedgeStrategy("CROISSANTS", limits["CROISSANTS"], {"PICNIC_BASKET1": 6, "PICNIC_BASKET2": 4}),
+            "JAMS": BasketHedgeStrategy("JAMS", limits["JAMS"], {"PICNIC_BASKET1": 3, "PICNIC_BASKET2": 2}),
+            "DJEMBES": BasketHedgeStrategy("DJEMBES", limits["DJEMBES"], {"PICNIC_BASKET1": 1}),
+            "PICNIC_BASKET1": PicnicBasket1Strategy("PICNIC_BASKET1",
+                                                    components={"CROISSANTS": 6, "JAMS": 3, "DJEMBES": 1},
+                                                    limit=limits["PICNIC_BASKET1"],
+                                                    spread=60),
+            "PICNIC_BASKET2": PicnicBasket1Strategy("PICNIC_BASKET2",
+                                                      components={"CROISSANTS": 4, "JAMS": 2},
+                                                      limit=limits["PICNIC_BASKET2"],
+                                                      spread=60),
+            "SQUID_INK": SquidInkDeviationStrategy("SQUID_INK",
+                                                   limits["SQUID_INK"],
+                                                   n_days=210,
+                                                   z_high=2.5,
+                                                   z_low=1.5,
+                                                   profit_margin=9,
+                                                   sell_off_ratio=0.25,
+                                                   entering_aggression=1.6,
+                                                   take_profit_aggression=0,
+                                                   clearing_aggression=1,
+                                                   high_hold_duration=15000,
+                                                   low_hold_duration=8000,
+                                                   low_trade_ratio=0.5),
 
         }
 
