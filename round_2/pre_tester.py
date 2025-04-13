@@ -225,11 +225,6 @@ class ResinStrategy(MarketMakingStrategy):
 class KelpStrategy(MarketMakingStrategy):
     def __init__(self, symbol: str, limit: int) -> None:
         super().__init__(symbol, limit)
-        # Kalman filter initialization:
-        self.true_value_estimate = None    # The estimated fair value
-        self.error_cov = 1.0               # Initial error covariance
-        self.process_variance = 2.0        # How much we expect the true value to change
-        self.measurement_variance = 4    # How noisy the measurement is
 
     def get_true_value(self, state: TradingState) -> int:
         order_depth = state.order_depths[self.symbol]
